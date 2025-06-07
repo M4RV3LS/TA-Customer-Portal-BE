@@ -1,9 +1,13 @@
 // customer-portal/backend/routes/internalRoutes.js
 const express = require("express");
 const router = express.Router();
-const connection = require("../dbConnection"); // For user_database
+const connection = require("../dbConnection");
 const { ethers } = require("ethers");
-const KYCArtifact = require("../abi/KycRegistryV3.json"); // Adjust path if needed
+const KYCArtifact = require("../abi/KycRegistryV3.json");
+const util = require("util");
+const queryAsync = util.promisify(connection.query).bind(connection);
+const { aesEncrypt } = require("../utils/cryptoUtils"); // Use the existing util
+const crypto = require("crypto");
 
 // --- Bank Authentication Middleware (Simplified API Key Check) ---
 // In production, use a more robust method like OAuth 2.0 client credentials or mTLS.
@@ -160,5 +164,99 @@ router.post(
     }
   }
 );
+
+/**
+ * ✅ NEW ENDPOINT
+ * POST /internal/sync-kyc-bundle
+ * Called by a bank AFTER a successful on-chain `addKycVersion` call.
+ * It receives the raw KTP/KYC data, creates a new encrypted bundle and a new
+ * one-time decryption key, and stores them in the customer_portal.user_profiles table.
+ */
+router.post("/sync-kyc-bundle", authenticateBankRequest, async (req, res) => {
+  const { userId, ktpData, kycData } = req.body;
+  const callingBankId = req.requestingBankId; // from authenticateBankRequest middleware
+
+  if (!userId || !ktpData || !kycData) {
+    return res
+      .status(400)
+      .json({ error: "Missing userId, ktpData, or kycData" });
+  }
+
+  try {
+    console.log(
+      `[CP - /internal/sync-kyc-bundle] Request received for user ${userId} from bank ${callingBankId}.`
+    );
+
+    // 1. Generate new key and encrypted bundle
+    const newGeneratedKeyHex = crypto.randomBytes(32).toString("hex");
+    const bundleToEncryptString = JSON.stringify({ ktpData, kycData });
+
+    // We need the aesEncrypt function. Let's define it here if not in a util.
+    function internalAesEncrypt(text, keyHex) {
+      const key = Buffer.from(keyHex, "hex");
+      if (key.length !== 32) throw new Error("Invalid key length for AES-256.");
+      const iv = crypto.randomBytes(16);
+      const cipher = crypto.createCipheriv("aes-256-cbc", key, iv);
+      let encrypted = cipher.update(text, "utf8", "hex");
+      encrypted += cipher.final("hex");
+      return iv.toString("hex") + ":" + encrypted;
+    }
+
+    const newEncryptedBundleHex = internalAesEncrypt(
+      bundleToEncryptString,
+      newGeneratedKeyHex
+    );
+
+    console.log(
+      `[CP - /internal/sync-kyc-bundle] Generated new key and bundle for user ${userId}.`
+    );
+
+    // 2. Fetch current first_bank_code
+    const [userProfileData] = await queryAsync(
+      `SELECT first_bank_code FROM user_profiles WHERE user_id = ?`,
+      [userId]
+    );
+
+    if (!userProfileData) {
+      return res.status(404).json({
+        error:
+          "Cannot sync bundle, user profile does not exist in Customer Portal.",
+      });
+    }
+
+    // 3. Determine and update the user_profiles record
+    let finalFirstBankCode = userProfileData.first_bank_code || callingBankId;
+
+    await queryAsync(
+      `UPDATE user_profiles
+         SET first_bank_code = ?,
+             encrypted_bundle = ?,
+             decrypt_key = ?,
+             is_copied = 0,
+             updated_at = NOW()
+       WHERE user_id = ?`,
+      [finalFirstBankCode, newEncryptedBundleHex, newGeneratedKeyHex, userId]
+    );
+
+    console.log(
+      `[CP - /internal/sync-kyc-bundle] Successfully updated profile for user ${userId}.`
+    );
+
+    return res.json({
+      success: true,
+      message: "Customer Portal profile synced successfully.",
+      newKey: newGeneratedKeyHex,
+      newEncryptedBundle: newEncryptedBundleHex,
+    });
+  } catch (err) {
+    console.error(
+      `[CP - /internal/sync-kyc-bundle] Error for user ${userId}:`,
+      err
+    );
+    return res
+      .status(500)
+      .json({ error: "Failed to sync KYC bundle.", detail: err.message });
+  }
+});
 
 module.exports = router;

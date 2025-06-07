@@ -35,19 +35,29 @@ function saveOTP(userId, otp) {
   });
 }
 
-function sendOTPEmail(email, otp) {
-  return transporter.sendMail({
+function sendOTPEmail(email, otp, customContent = null) {
+  const mailOptions = {
     from: '"Your App" <your_email@gmail.com>',
     to: email,
-    subject: "Your Login OTP",
-    text: `Your One-Time Password is ${otp} (expires in ${OTP_EXPIRY_MINUTES} min)`,
-  });
+    subject: customContent ? customContent.subject : "Your Login OTP",
+    text: customContent
+      ? undefined
+      : `Your One-Time Password is ${otp} (expires in ${OTP_EXPIRY_MINUTES} min)`,
+    html: customContent ? customContent.html : undefined,
+  };
+  return transporter.sendMail(mailOptions);
 }
 
-async function issueOTP(userId, email) {
-  const otp = generateOTP();
-  await saveOTP(userId, otp);
-  await sendOTPEmail(email, otp);
+async function issueOTP(userId, email, customContent = null) {
+  if (customContent) {
+    // If sending a custom email (like a reset link), we don't need to generate/save an OTP
+    await sendOTPEmail(email, null, customContent);
+  } else {
+    // Original OTP flow
+    const otp = generateOTP();
+    await saveOTP(userId, otp);
+    await sendOTPEmail(email, otp);
+  }
 }
 
 function verifyOTP(userId, otp) {

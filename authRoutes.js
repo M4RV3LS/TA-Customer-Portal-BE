@@ -258,13 +258,6 @@ router.get("/verify", (req, res) => {
 
 // --- LOGIN STEP 1: credentials check + issue OTP ---
 router.post("/login", (req, res) => {
-  // const email = decrypt(req.body.email);
-  // const password = decrypt(req.body.password);
-
-  // 1) Log the raw incoming body
-  console.log("🔐 [LOGIN] raw body:", req.body);
-
-  // 2) Try to decrypt safely
   let email, password;
   try {
     if (!req.body.email || !req.body.password) {
@@ -273,38 +266,40 @@ router.post("/login", (req, res) => {
     email = decrypt(req.body.email);
     password = decrypt(req.body.password);
   } catch (err) {
-    console.error(
-      "❌ [LOGIN] decrypt error:",
-      err.message,
-      "\npayload:",
-      req.body
-    );
+    console.error("❌ [LOGIN] decrypt error:", err.message);
     return res.status(400).json({
       error: "Invalid encryption format — please check your encrypt util",
     });
   }
 
   connection.query(
-    `SELECT id, email, password, verified
-     FROM users_credential WHERE email=?`,
+    `SELECT id, email, password, verified FROM users_credential WHERE email=?`,
     [email],
     async (err, rows) => {
-      console.error("[LOGIN ERROR] Failed to process login:", err);
-      if (err) return res.status(500).json({ error: "Server error" });
-      if (!rows.length)
+      // ✅ FIX: Only log an error if one actually occurs.
+      if (err) {
+        console.error("[LOGIN ERROR] Failed to process login:", err);
+        return res.status(500).json({ error: "Server error" });
+      }
+
+      if (!rows.length) {
         return res.status(400).json({ error: "Invalid credentials" });
+      }
 
       const user = rows[0];
-      if (!user.verified)
+      if (!user.verified) {
         return res.status(400).json({ error: "Email not verified" });
+      }
 
       const match = await bcrypt.compare(password, user.password);
-      if (!match) return res.status(400).json({ error: "Invalid credentials" });
+      if (!match) {
+        return res.status(400).json({ error: "Invalid credentials" });
+      }
 
-      // store temp userId while waiting for OTP
+      // Store temp userId while waiting for OTP
       req.session.tempUserId = user.id;
 
-      // issue OTP
+      // Issue OTP
       try {
         await issueOTP(user.id, user.email);
         return res.json({
@@ -312,7 +307,7 @@ router.post("/login", (req, res) => {
           message: "OTP sent to your email",
         });
       } catch (e) {
-        console.error(e);
+        console.error("[LOGIN] Failed to send OTP:", e);
         return res.status(500).json({ error: "Failed to send OTP" });
       }
     }
